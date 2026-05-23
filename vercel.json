@@ -5,12 +5,5 @@
       "src": "/(.*)",
       "dest": "/api/index.js"
     }
-  ],
-  "crons": [],
-  "images": {
-    "sizes": [],
-    "domains": [],
-    "minimumCacheTTL": 0,
-    "formats": []
-  }
+  ]
 }
