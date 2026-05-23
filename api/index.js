@@ -1,63 +1,89 @@
-const INVIDIOUS_INSTANCE = 'https://iv.melmac.space'; // 必要に応じて変更してください
+// 利用可能なInvidiousインスタンスのリスト
+const INVIDIOUS_INSTANCES = [
+  'https://inv.nadeko.net',
+  'https://invidious.f5.si',
+  'https://invidious.ritoge.com',
+  'https://invidious.ducks.party',
+  'https://super8.absturztau.be',
+  'https://invidious.darkness.services',
+  'https://yt.omada.cafe',
+  'https://iv.melmac.space',
+  'https://iv.duti.dev'
+];
 
 export default async function handler(request) {
-  try {
-    const url = new URL(request.url);
+  const url = new URL(request.url);
+
+  // リクエストボディを並列リクエストで使い回せるように一度バッファ化
+  let bodyBuffer = null;
+  if (request.method !== 'GET' && request.method !== 'HEAD' && request.body) {
+    bodyBuffer = await request.arrayBuffer();
+  }
+
+  // クライアントからの共通リクエストヘッダーを整形
+  const baseHeaders = new Headers(request.headers);
+  baseHeaders.delete('host');
+  baseHeaders.delete('x-forwarded-host');
+  baseHeaders.delete('x-vercel-deployment-url');
+
+  // 各インスタンスへのFetch処理をPromiseの配列にする
+  const fetchPromises = INVIDIOUS_INSTANCES.map(async (instance) => {
+    const targetUrl = `${instance}${url.pathname}${url.search}`;
     
-    // 1. パスとクエリパラメータの完全な組み立て
-    // Vercelへのリクエストパス（例: /api/v1/videos/xxx?hl=ja）をそのままターゲットに結合
-    const targetUrl = `${INVIDIOUS_INSTANCE}${url.pathname}${url.search}`;
+    // ヘッダーはインスタンスごとにインスタンス化（副作用防止）
+    const requestHeaders = new Headers(baseHeaders);
 
-    // 2. リクエストヘッダーの複製とクリーンアップ
-    const requestHeaders = new Headers(request.headers);
-    // ホスト名のミスマッチによる接続拒否を防ぐため、Host関連ヘッダーを削除
-    requestHeaders.delete('host');
-    requestHeaders.delete('x-forwarded-host');
-    requestHeaders.delete('x-vercel-deployment-url');
-
-    // 3. リクエストボディの準備（GET/HEAD以外の場合）
-    let body = null;
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      // request.body は ReadableStream なので、そのまま fetch に渡してストリーミング転送
-      body = request.body;
-    }
-
-    // 4. オリジナルのAPIへそのままリクエストを送信
-    const invidiousResponse = await fetch(targetUrl, {
+    const res = await fetch(targetUrl, {
       method: request.method,
       headers: requestHeaders,
-      body: body,
-      duplex: 'half', // Node.js環境でストリームボディを扱うための標準仕様
+      body: bodyBuffer,
+      duplex: bodyBuffer ? 'half' : undefined,
     });
 
-    // 5. レスポンスヘッダーの複製
-    const responseHeaders = new Headers(invidiousResponse.headers);
-    
-    // fetchが自動でデコード（解凍）を行うため、content-encodingヘッダーが残っていると
-    // クライアント側で二重解凍エラー（文字化けや破損）が起きるので削除します
-    responseHeaders.delete('content-encoding');
-    responseHeaders.delete('content-length'); // ストリーミング返却のため、サイズ指定もブラウザに任せる
+    // 200系（または404などの有効なエラー扱い）ではない拒否ステータスは即座に弾く
+    if (!res.ok && [403, 429, 500, 502, 503, 504].includes(res.status)) {
+      throw new Error(`Instance ${instance} returned invalid status ${res.status}`);
+    }
 
-    // 6. ステータス、ヘッダー、ボディ（ストリーム）を完全にそのままクライアントへ返却
-    return new Response(invidiousResponse.body, {
-      status: invidiousResponse.status,
-      statusText: invidiousResponse.statusText,
+    // 正常なレスポンス（または確定した404など）ならそのままオブジェクトとして解決
+    return res;
+  });
+
+  try {
+    // 1. Promise.any を使い、一番早く「成功（resolve）」したレスポンスをキャッチする
+    // ※エラー（throw）になったインスタンスは自動で無視されます
+    const fastestResponse = await Promise.any(fetchPromises);
+
+    // 2. 最速レスポンスのヘッダーを複製・クリーンアップ
+    const responseHeaders = new Headers(fastestResponse.headers);
+    responseHeaders.delete('content-encoding');
+    responseHeaders.delete('content-length');
+
+    // 3. クライアントへそのまま最速のストリームを返却
+    return new Response(fastestResponse.body, {
+      status: fastestResponse.status,
+      statusText: fastestResponse.statusText,
       headers: responseHeaders,
     });
 
-  } catch (error) {
-    console.error('Proxy Error:', error);
+  } catch (aggregateError) {
+    // すべてのインスタンスの非同期処理が失敗（reject）した場合、ここに入ります
+    console.error('All instances failed:', aggregateError.errors);
+    
     return new Response(
-      JSON.stringify({ error: 'Internal Server Error via Proxy', details: error.message }),
+      JSON.stringify({
+        error: 'All Invidious instances failed concurrently.',
+        details: aggregateError.errors.map(e => e.message)
+      }),
       {
-        status: 500,
+        status: 502, // Bad Gateway
         headers: { 'Content-Type': 'application/json' }
       }
     );
   }
 }
 
-// VercelのEdge/Serverlessで標準のWeb APIベース（Geckoランタイム等）で動作させる設定
+// Vercel Edge Runtime
 export const config = {
   runtime: 'edge',
 };
