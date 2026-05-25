@@ -1,4 +1,3 @@
-// 利用可能なInvidiousインスタンスのリスト（Anubis等のボットガードがキツい場所は下位に回すのが安全です）
 const INVIDIOUS_INSTANCES = [
   'https://inv.nadeko.net',
   'https://invidious.f5.si',
@@ -15,7 +14,6 @@ export default async function handler(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  // 1. 指定された8つのAPIエンドポイントのみに厳格に制限
   const isTargetApi = 
     /^\/api\/v1\/videos\/[^\/]+$/.test(pathname) ||
     /^\/api\/v1\/comments\/[^\/]+$/.test(pathname) ||
@@ -38,17 +36,14 @@ export default async function handler(request) {
     bodyBuffer = await request.arrayBuffer();
   }
 
-  // クライアントからの共通ヘッダー
   const baseHeaders = new Headers(request.headers);
   baseHeaders.delete('host');
   baseHeaders.delete('x-forwarded-host');
   baseHeaders.delete('x-vercel-deployment-url');
 
-  // 【重要】ボットフィルター（Anubis等）を突破するためにUser-Agentを一般的なブラウザに偽装
   baseHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-  baseHeaders.set('Accept', 'application/json'); // JSONを求めていることを明示
+  baseHeaders.set('Accept', 'application/json');
 
-  // 2. 全インスタンスへ同時にリクエストを送信
   const fetchPromises = INVIDIOUS_INSTANCES.map(async (instance) => {
     const targetUrl = `${instance}${url.pathname}${url.search}`;
     const requestHeaders = new Headers(baseHeaders);
@@ -60,16 +55,56 @@ export default async function handler(request) {
       duplex: bodyBuffer ? 'half' : undefined,
     });
 
-    if (!res.ok && [403, 429, 500, 502, 503, 504].includes(res.status)) {
+    if (!res.ok && (res.status === 403 || res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504)) {
       throw new Error(`Instance ${instance} returned invalid status ${res.status}`);
     }
 
-    // テキストとして吸い上げる
-    const responseText = await res.text();
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let chunkCount = 0;
+    let headText = '';
+    let hasHtml = false;
+    const chunks = [];
 
-    // 【追加強化】返ってきた中身がJSONではなく「<!doctype html」などのHTML（ボット確認画面）だった場合、
-    // 正常なレスポンスではないため、強制的にエラーを発生させて落選させる（Promise.anyで無視させる）
-    if (responseText.trim().toLowerCase().startsWith('<!doctype html') || responseText.includes('<html')) {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (value) {
+          chunks.push(value);
+          if (chunkCount < 3) {
+            headText += decoder.decode(value, { stream: true });
+            const trimmed = headText.trimStart();
+            if (
+              (trimmed.length >= 14 && trimmed.substring(0, 14).toLowerCase() === '<!doctype html') || 
+              headText.includes('<html')
+            ) {
+              hasHtml = true;
+              break;
+            }
+            chunkCount++;
+          }
+        }
+        if (done) break;
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (hasHtml) {
+      throw new Error(`Instance ${instance} returned HTML (Bot Challenge) instead of JSON.`);
+    }
+
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+    const combinedArray = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combinedArray.set(chunk, offset);
+      offset += chunk.length;
+    }
+    const responseText = decoder.decode(combinedArray);
+
+    const trimmed = responseText.trimStart();
+    if (trimmed.length >= 14 && trimmed.substring(0, 14).toLowerCase() === '<!doctype html' || responseText.includes('<html')) {
       throw new Error(`Instance ${instance} returned HTML (Bot Challenge) instead of JSON.`);
     }
     
@@ -82,7 +117,6 @@ export default async function handler(request) {
   });
 
   try {
-    // 一番早く「ボット確認画面をすり抜けて、本物のJSONデータを返した」インスタンスを採用
     const fastestResult = await Promise.any(fetchPromises);
 
     const responseHeaders = new Headers(fastestResult.headers);
