@@ -109,6 +109,10 @@ export default async function handler(request) {
       throw new Error(`Instance ${instance} returned HTML (Bot Challenge) instead of JSON.`);
     }
     
+    if (responseText.includes('"type": "parse-error"') || responseText.includes('"errorMessage":')) {
+      throw new Error(`Instance ${instance} returned internal parse-error JSON.`);
+    }
+
     return {
       status: res.status,
       statusText: res.statusText,
