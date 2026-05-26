@@ -20,6 +20,7 @@ export default async function handler(request) {
     pathname === '/api/v1/search' ||
     /^\/api\/v1\/channels\/[^\/]+$/.test(pathname) ||
     /^\/api\/v1\/channels\/videos\/[^\/]+$/.test(pathname) ||
+    /^\/api\/v1\/channels\/[^\/]+\/videos$/.test(pathname) ||
     /^\/api\/v1\/playlists\/[^\/]+$/.test(pathname) ||
     pathname === '/api/v1/trending' ||
     pathname === '/api/v1/popular';
