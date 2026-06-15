@@ -99,13 +99,19 @@ export default async function handler(request) {
           throw new Error(`Instance ${instance} returned invalid JSON.`);
         }
 
+        try {
+          JSON.parse(trimmed);
+        } catch (e) {
+          throw new Error(`Instance ${instance} returned malformed JSON.`);
+        }
+
         return {
           status: res.status,
           responseText
         };
       } catch (err) {
         if (timeoutId) clearTimeout(timeoutId);
-        throw new Error(`[${instance}] ${err.message}`);
+        throw err;
       }
     })();
   });
